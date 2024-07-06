@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"runtime/debug"
 	
 	"github.com/jsteenb2/errors"
 )
@@ -16,17 +17,30 @@ const (
 
 var (
 	ErrIDRequired = errors.Kind("id is required")
+	
+	version = func() string {
+		if info, ok := debug.ReadBuildInfo(); ok {
+			for _, m := range info.Deps {
+				if m.Path == "github.com/jsteenb2/allsrvc" {
+					return m.Version
+				}
+			}
+		}
+		return ""
+	}()
 )
 
 type ClientHTTP struct {
-	addr string
-	c    *http.Client
+	addr   string
+	origin string
+	c      *http.Client
 }
 
-func NewClientHTTP(addr string, c *http.Client) *ClientHTTP {
+func NewClientHTTP(addr, origin string, c *http.Client) *ClientHTTP {
 	return &ClientHTTP{
-		addr: addr,
-		c:    c,
+		addr:   addr,
+		origin: origin,
+		c:      c,
 	}
 }
 
@@ -47,7 +61,7 @@ type (
 )
 
 func (c *ClientHTTP) CreateFoo(ctx context.Context, attrs FooCreateAttrs) (RespBody[ResourceFooAttrs], error) {
-	req, err := jsonReq(ctx, "POST", c.fooPath(""), newFooData("", attrs))
+	req, err := jsonReq(ctx, "POST", c.fooPath(""), c.origin, newFooData("", attrs))
 	if err != nil {
 		return RespBody[ResourceFooAttrs]{}, errors.Wrap(err, "create foo")
 	}
@@ -61,7 +75,7 @@ func (c *ClientHTTP) ReadFoo(ctx context.Context, id string) (RespBody[ResourceF
 		return RespBody[ResourceFooAttrs]{}, errors.Wrap(ErrIDRequired)
 	}
 	
-	req, err := http.NewRequestWithContext(ctx, "GET", c.fooPath(id), nil)
+	req, err := newRequest(ctx, "GET", c.fooPath(id), c.origin, nil)
 	if err != nil {
 		return RespBody[ResourceFooAttrs]{}, errors.Wrap(err)
 	}
@@ -76,7 +90,7 @@ type FooUpdAttrs struct {
 }
 
 func (c *ClientHTTP) UpdateFoo(ctx context.Context, id string, attrs FooUpdAttrs) (RespBody[ResourceFooAttrs], error) {
-	req, err := jsonReq(ctx, "PATCH", c.fooPath(id), newFooData(id, attrs))
+	req, err := jsonReq(ctx, "PATCH", c.fooPath(id), c.origin, newFooData(id, attrs))
 	if err != nil {
 		return RespBody[ResourceFooAttrs]{}, errors.Wrap(err)
 	}
@@ -90,17 +104,17 @@ func (c *ClientHTTP) DelFoo(ctx context.Context, id string) (RespBody[any], erro
 		return RespBody[any]{}, errors.Wrap(ErrIDRequired)
 	}
 	
-	req, err := http.NewRequestWithContext(ctx, "DELETE", c.fooPath(id), nil)
+	req, err := newRequest(ctx, "DELETE", c.fooPath(id), c.origin, nil)
 	if err != nil {
 		return RespBody[any]{}, errors.Wrap(err)
 	}
 	
-	resp, err := doReq[any](c.c, req)
+	resp, err := doJSON[any](c.c, req)
 	return resp, errors.Wrap(err)
 }
 
 func (c *ClientHTTP) doFooReq(req *http.Request) (RespBody[ResourceFooAttrs], error) {
-	resp, err := doReq[ResourceFooAttrs](c.c, req)
+	resp, err := doJSON[ResourceFooAttrs](c.c, req)
 	return resp, errors.Wrap(err)
 }
 
@@ -123,7 +137,7 @@ func newFooData[Attr Attrs](id string, attrs Attr) Data[Attr] {
 // jsonReq here uses generics to provide feedback to developers when they provide some other field.
 // This improves the feedback loop working with these methods. If they copy pasta wrong and provide
 // ReqBody[Attr] instead, this will reject that.
-func jsonReq[Attr Attrs](ctx context.Context, method, path string, v Data[Attr]) (*http.Request, error) {
+func jsonReq[Attr Attrs](ctx context.Context, method, path, origin string, v Data[Attr]) (*http.Request, error) {
 	reqBody := ReqBody[Attr]{Data: v}
 	
 	var buf bytes.Buffer
@@ -131,7 +145,7 @@ func jsonReq[Attr Attrs](ctx context.Context, method, path string, v Data[Attr])
 		return nil, errors.Wrap(err, "failed to json encode request body")
 	}
 	
-	req, err := http.NewRequestWithContext(ctx, method, path, &buf)
+	req, err := newRequest(ctx, method, path, origin, &buf)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +154,20 @@ func jsonReq[Attr Attrs](ctx context.Context, method, path string, v Data[Attr])
 	return req, nil
 }
 
-func doReq[Attr Attrs](c *http.Client, req *http.Request) (RespBody[Attr], error) {
+func newRequest(ctx context.Context, method, path, origin string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	
+	// add origin and user agent to track SDK usage. Incredibly helpful!
+	req.Header.Set("Origin", origin)
+	req.Header.Set("User-Agent", "allsrvc (github.com/jsteenb2/allsrvc) / "+version)
+	
+	return req, nil
+}
+
+func doJSON[Attr Attrs](c *http.Client, req *http.Request) (RespBody[Attr], error) {
 	resp, err := c.Do(req)
 	if err != nil {
 		return *new(RespBody[Attr]), errors.Wrap(err)
