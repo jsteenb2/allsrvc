@@ -30,18 +30,34 @@ var (
 	}()
 )
 
+func WithBasicAuth(user, pass string) func(*ClientHTTP) {
+	return func(c *ClientHTTP) {
+		c.authFn = func(r *http.Request) error {
+			r.SetBasicAuth(user, pass)
+			return nil
+		}
+	}
+}
+
 type ClientHTTP struct {
 	addr   string
 	origin string
 	c      *http.Client
+	authFn func(r *http.Request) error
 }
 
-func NewClientHTTP(addr, origin string, c *http.Client) *ClientHTTP {
-	return &ClientHTTP{
+func NewClientHTTP(addr, origin string, c *http.Client, opts ...func(*ClientHTTP)) *ClientHTTP {
+	out := ClientHTTP{
 		addr:   addr,
 		origin: origin,
 		c:      c,
+		authFn: func(r *http.Request) error { return nil },
 	}
+	for _, o := range opts {
+		o(&out)
+	}
+	
+	return &out
 }
 
 // Foo API types
@@ -109,11 +125,20 @@ func (c *ClientHTTP) DelFoo(ctx context.Context, id string) (RespBody[any], erro
 		return RespBody[any]{}, errors.Wrap(err)
 	}
 	
+	err = c.authFn(req)
+	if err != nil {
+		return RespBody[any]{}, errors.Wrap(err)
+	}
+	
 	resp, err := doJSON[any](c.c, req)
 	return resp, errors.Wrap(err)
 }
 
 func (c *ClientHTTP) doFooReq(req *http.Request) (RespBody[ResourceFooAttrs], error) {
+	if err := c.authFn(req); err != nil {
+		return RespBody[ResourceFooAttrs]{}, errors.Wrap(err)
+	}
+	
 	resp, err := doJSON[ResourceFooAttrs](c.c, req)
 	return resp, errors.Wrap(err)
 }
